@@ -1,13 +1,36 @@
-
 --[[
-    MobileOutput
+    MobileOutput v2
     A mobile-friendly Roblox client Output console.
+
+    New in v2:
+      - Filter tabs (All / Info / Warn / Error) with live counts
+      - Timestamps and color accent bars on every line
+      - Tap a line to copy it, "Copy" button copies everything visible
+      - Smart auto-scroll (pauses when you scroll up, "Jump to latest" button)
+      - Smooth minimize / restore animation with error count in the title
+      - Window stays on-screen, resize is clamped, press feedback on touch
+      - Pre-fills recent log history when launched
 ]]
 
-local Players = game:GetService("Players")
 local LogService = game:GetService("LogService")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
+
+--==================================================
+-- SETTINGS
+--==================================================
+
+local MAX_MESSAGES = 150
+local MAX_MESSAGE_LENGTH = 2000
+local PREFILL_HISTORY = true
+local FONT_SIZE = 13
+
+local HEADER_H = 44
+local FILTER_H = 34
+local MIN_W, MIN_H = 280, 220
+local MAX_W, MAX_H = 650, 600
+local MINI_W = 220
 
 --==================================================
 -- EXECUTOR ENVIRONMENT
@@ -46,6 +69,7 @@ local function getRequestFunction()
 end
 
 local requestFunction = getRequestFunction()
+local clipboardFunction = env.setclipboard or env.toclipboard or env.set_clipboard
 
 local function downloadAsset(filename, url)
     local fileExists = env.isfile
@@ -96,22 +120,104 @@ local resizeIcon = downloadAsset(
 )
 
 --==================================================
--- COLORS
+-- THEME
 --==================================================
 
 local Colors = {
-    Background = Color3.fromRGB(17, 27, 38),
-    Header = Color3.fromRGB(28, 49, 65),
-    Border = Color3.fromRGB(48, 75, 94),
+    Background = Color3.fromRGB(13, 21, 30),
+    Surface = Color3.fromRGB(21, 36, 49),
+    Header = Color3.fromRGB(24, 42, 57),
+    Border = Color3.fromRGB(47, 74, 93),
 
-    Info = Color3.fromRGB(117, 190, 224),
+    Accent = Color3.fromRGB(94, 190, 235),
+    Info = Color3.fromRGB(150, 205, 232),
     Warning = Color3.fromRGB(245, 210, 125),
-    Error = Color3.fromRGB(239, 137, 137),
+    Error = Color3.fromRGB(240, 140, 140),
 
     Text = Color3.fromRGB(225, 237, 245),
-    Muted = Color3.fromRGB(150, 174, 190),
-    Button = Color3.fromRGB(43, 68, 84),
+    Muted = Color3.fromRGB(125, 152, 170),
+    Button = Color3.fromRGB(40, 64, 82),
+    CloseButton = Color3.fromRGB(94, 52, 62),
 }
+
+local KIND_COLORS = {
+    info = Colors.Info,
+    warn = Colors.Warning,
+    error = Colors.Error,
+}
+
+local KIND_NAMES = {
+    info = "INFO",
+    warn = "WARN",
+    error = "ERROR",
+}
+
+--==================================================
+-- HELPERS
+--==================================================
+
+local connections = {}
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+
+local function new(className, props, parent)
+    local instance = Instance.new(className)
+
+    for key, value in pairs(props) do
+        instance[key] = value
+    end
+
+    instance.Parent = parent
+    return instance
+end
+
+local function addCorner(instance, radius)
+    return new("UICorner", {
+        CornerRadius = UDim.new(0, radius),
+    }, instance)
+end
+
+local function addPadding(instance, left, right, top, bottom)
+    return new("UIPadding", {
+        PaddingLeft = UDim.new(0, left or 0),
+        PaddingRight = UDim.new(0, right or 0),
+        PaddingTop = UDim.new(0, top or 0),
+        PaddingBottom = UDim.new(0, bottom or 0),
+    }, instance)
+end
+
+local function tween(instance, props, duration)
+    TweenService:Create(
+        instance,
+        TweenInfo.new(duration or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        props
+    ):Play()
+end
+
+local function toHex(color)
+    return string.format(
+        "#%02X%02X%02X",
+        math.floor(color.R * 255 + 0.5),
+        math.floor(color.G * 255 + 0.5),
+        math.floor(color.B * 255 + 0.5)
+    )
+end
+
+local function escapeRich(text)
+    text = string.gsub(text, "&", "&amp;")
+    text = string.gsub(text, "<", "&lt;")
+    text = string.gsub(text, ">", "&gt;")
+    return text
+end
+
+local function isPointerStart(input)
+    return input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch
+end
 
 --==================================================
 -- CLEAN UP OLD GUI
@@ -127,230 +233,689 @@ end
 -- GUI SETUP
 --==================================================
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "MobileOutput"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 999
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local gui = new("ScreenGui", {
+    Name = "MobileOutput",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    DisplayOrder = 999,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
 
-local window = Instance.new("Frame")
-window.Name = "Window"
-window.Size = UDim2.new(0.92, 0, 0.52, 0)
-window.Position = UDim2.new(0.04, 0, 0.22, 0)
-window.BackgroundColor3 = Colors.Background
-window.BorderSizePixel = 0
-window.ClipsDescendants = true
-window.Active = true
-window.ZIndex = 1
-window.Parent = gui
+-- Start with a size that fits the current screen.
+local camera = workspace.CurrentCamera
+local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
 
-local windowCorner = Instance.new("UICorner")
-windowCorner.CornerRadius = UDim.new(0, 10)
-windowCorner.Parent = window
+local startWidth = math.clamp(math.floor(viewport.X * 0.92), MIN_W, MAX_W)
+local startHeight = math.clamp(math.floor(viewport.Y * 0.55), MIN_H, MAX_H)
 
-local windowStroke = Instance.new("UIStroke")
-windowStroke.Color = Colors.Border
-windowStroke.Thickness = 1
-windowStroke.Transparency = 0.25
-windowStroke.Parent = window
+local window = new("Frame", {
+    Name = "Window",
+    Size = UDim2.fromOffset(startWidth, startHeight),
+    Position = UDim2.fromOffset(
+        math.max(0, math.floor((viewport.X - startWidth) / 2)),
+        math.floor(viewport.Y * 0.16)
+    ),
+    BackgroundColor3 = Colors.Background,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+    Active = true,
+}, gui)
 
-local sizeConstraint = Instance.new("UISizeConstraint")
-sizeConstraint.MinSize = Vector2.new(250, 220)
-sizeConstraint.MaxSize = Vector2.new(650, 600)
-sizeConstraint.Parent = window
+addCorner(window, 12)
+
+local windowStroke = new("UIStroke", {
+    Color = Colors.Border,
+    Thickness = 1,
+    Transparency = 0.2,
+    ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, window)
 
 --==================================================
 -- HEADER
 --==================================================
 
-local header = Instance.new("Frame")
-header.Name = "Header"
-header.Size = UDim2.new(1, 0, 0, 44)
-header.BackgroundColor3 = Colors.Header
-header.BorderSizePixel = 0
-header.Active = true
-header.ZIndex = 2
-header.Parent = window
+local header = new("Frame", {
+    Name = "Header",
+    Size = UDim2.new(1, 0, 0, HEADER_H),
+    BackgroundColor3 = Colors.Header,
+    BorderSizePixel = 0,
+    Active = true,
+    ZIndex = 2,
+}, window)
 
-local headerCorner = Instance.new("UICorner")
-headerCorner.CornerRadius = UDim.new(0, 10)
-headerCorner.Parent = header
+addCorner(header, 12)
 
--- Squares the lower corners of the header.
-local headerFill = Instance.new("Frame")
-headerFill.Name = "HeaderFill"
-headerFill.Position = UDim2.new(0, 0, 0, 10)
-headerFill.Size = UDim2.new(1, 0, 0, 34)
-headerFill.BackgroundColor3 = Colors.Header
-headerFill.BorderSizePixel = 0
-headerFill.ZIndex = 2
-headerFill.Parent = header
+-- Squares the lower corners of the header (hidden when minimized).
+local headerFill = new("Frame", {
+    Name = "HeaderFill",
+    Position = UDim2.new(0, 0, 1, -12),
+    Size = UDim2.new(1, 0, 0, 12),
+    BackgroundColor3 = Colors.Header,
+    BorderSizePixel = 0,
+    ZIndex = 2,
+}, header)
 
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Name = "Title"
-titleLabel.Position = UDim2.new(0, 12, 0, 0)
-titleLabel.Size = UDim2.new(0, 90, 1, 0)
-titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "Output"
-titleLabel.TextColor3 = Colors.Text
-titleLabel.TextSize = 16
-titleLabel.Font = Enum.Font.GothamMedium
-titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-titleLabel.ZIndex = 3
-titleLabel.Parent = header
+local headerLine = new("Frame", {
+    Name = "HeaderLine",
+    Position = UDim2.new(0, 0, 1, -1),
+    Size = UDim2.new(1, 0, 0, 1),
+    BackgroundColor3 = Colors.Border,
+    BackgroundTransparency = 0.4,
+    BorderSizePixel = 0,
+    ZIndex = 3,
+}, header)
+
+local statusDot = new("Frame", {
+    Name = "StatusDot",
+    AnchorPoint = Vector2.new(0, 0.5),
+    Position = UDim2.new(0, 13, 0.5, 0),
+    Size = UDim2.fromOffset(8, 8),
+    BackgroundColor3 = Colors.Accent,
+    BorderSizePixel = 0,
+    ZIndex = 3,
+}, header)
+
+addCorner(statusDot, 4)
+
+local titleLabel = new("TextLabel", {
+    Name = "Title",
+    Position = UDim2.new(0, 28, 0, 0),
+    Size = UDim2.new(1, -204, 1, 0),
+    BackgroundTransparency = 1,
+    Text = "Output",
+    TextColor3 = Colors.Text,
+    TextSize = 15,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    ZIndex = 3,
+}, header)
 
 --==================================================
 -- HEADER BUTTONS
 --==================================================
 
-local function createHeaderButton(name, text, width, rightOffset)
-    local button = Instance.new("TextButton")
-    button.Name = name
-    button.AnchorPoint = Vector2.new(1, 0.5)
-    button.Position = UDim2.new(1, -rightOffset, 0.5, 0)
-    button.Size = UDim2.new(0, width, 0, 30)
-    button.BackgroundColor3 = Colors.Button
-    button.BackgroundTransparency = 1
-    button.BorderSizePixel = 0
-    button.AutoButtonColor = false
-    button.Text = text
-    button.TextColor3 = Colors.Text
-    button.TextSize = 15
-    button.Font = Enum.Font.GothamMedium
-    button.ZIndex = 4
-    button.Parent = header
+local function createHeaderButton(name, text, width, rightOffset, baseColor)
+    local button = new("TextButton", {
+        Name = name,
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -rightOffset, 0.5, 0),
+        Size = UDim2.fromOffset(width, 30),
+        BackgroundColor3 = baseColor or Colors.Button,
+        BackgroundTransparency = 0.35,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = text,
+        TextColor3 = Colors.Text,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        ZIndex = 4,
+    }, header)
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 6)
-    corner.Parent = button
+    addCorner(button, 8)
 
-    button.MouseEnter:Connect(function()
-        button.BackgroundTransparency = 0
+    -- Hover for mouse, press feedback for touch.
+    connect(button.MouseEnter, function()
+        tween(button, { BackgroundTransparency = 0 }, 0.12)
     end)
 
-    button.MouseLeave:Connect(function()
-        button.BackgroundTransparency = 1
+    connect(button.MouseLeave, function()
+        tween(button, { BackgroundTransparency = 0.35 }, 0.15)
+    end)
+
+    connect(button.InputBegan, function(input)
+        if isPointerStart(input) then
+            tween(button, { BackgroundTransparency = 0 }, 0.05)
+        end
+    end)
+
+    connect(button.InputEnded, function(input)
+        if isPointerStart(input) then
+            tween(button, { BackgroundTransparency = 0.35 }, 0.2)
+        end
     end)
 
     return button
 end
 
-local closeButton = createHeaderButton(
-    "CloseButton",
-    "×",
-    30,
-    7
-)
+local closeButton = createHeaderButton("CloseButton", "×", 30, 7, Colors.CloseButton)
+closeButton.TextSize = 22
+closeButton.Font = Enum.Font.Gotham
 
-closeButton.TextSize = 23
+local minimizeButton = createHeaderButton("MinimizeButton", "", 30, 43)
+local clearButton = createHeaderButton("ClearButton", "Clear", 44, 79)
+local copyButton = createHeaderButton("CopyButton", "Copy", 44, 127)
 
-local minimizeButton = createHeaderButton(
-    "MinimizeButton",
-    "",
-    30,
-    43
-)
+local minimizeImage
 
 if minimizeIcon then
-    local icon = Instance.new("ImageLabel")
-    icon.Name = "MinimizeIcon"
-    icon.AnchorPoint = Vector2.new(0.5, 0.5)
-    icon.Position = UDim2.fromScale(0.5, 0.5)
-    icon.Size = UDim2.fromOffset(17, 17)
-    icon.BackgroundTransparency = 1
-    icon.Image = minimizeIcon
-    icon.ImageColor3 = Colors.Text
-    icon.ScaleType = Enum.ScaleType.Fit
-    icon.ZIndex = 5
-    icon.Parent = minimizeButton
+    minimizeImage = new("ImageLabel", {
+        Name = "MinimizeIcon",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(16, 16),
+        BackgroundTransparency = 1,
+        Image = minimizeIcon,
+        ImageColor3 = Colors.Text,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 5,
+    }, minimizeButton)
 else
-    minimizeButton.Text = "−"
-    minimizeButton.TextSize = 22
+    minimizeButton.Text = "–"
+    minimizeButton.TextSize = 20
 end
 
-local clearButton = createHeaderButton(
-    "ClearButton",
-    "Clear",
-    48,
-    79
-)
-
-clearButton.TextSize = 12
-
 --==================================================
--- OUTPUT AREA
+-- BODY (filters + messages)
 --==================================================
 
-local content = Instance.new("Frame")
-content.Name = "Content"
-content.Position = UDim2.new(0, 0, 0, 44)
-content.Size = UDim2.new(1, 0, 1, -44)
-content.BackgroundColor3 = Colors.Background
-content.BorderSizePixel = 0
-content.ZIndex = 1
-content.Parent = window
+local body = new("Frame", {
+    Name = "Body",
+    Position = UDim2.new(0, 0, 0, HEADER_H),
+    Size = UDim2.new(1, 0, 1, -HEADER_H),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+}, window)
 
-local scrolling = Instance.new("ScrollingFrame")
-scrolling.Name = "Messages"
-scrolling.Position = UDim2.new(0, 8, 0, 7)
-scrolling.Size = UDim2.new(1, -16, 1, -14)
-scrolling.BackgroundTransparency = 1
-scrolling.BorderSizePixel = 0
-scrolling.ScrollBarThickness = 4
-scrolling.ScrollBarImageColor3 = Colors.Border
-scrolling.CanvasSize = UDim2.new(0, 0, 0, 0)
-scrolling.AutomaticCanvasSize = Enum.AutomaticSize.Y
-scrolling.ScrollingDirection = Enum.ScrollingDirection.Y
-scrolling.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
-scrolling.ClipsDescendants = true
-scrolling.ZIndex = 1
-scrolling.Parent = content
+local filterBar = new("Frame", {
+    Name = "Filters",
+    Size = UDim2.new(1, 0, 0, FILTER_H),
+    BackgroundTransparency = 1,
+    ZIndex = 2,
+}, body)
 
-local listLayout = Instance.new("UIListLayout")
-listLayout.Name = "MessageLayout"
-listLayout.Padding = UDim.new(0, 4)
-listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Parent = scrolling
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    VerticalAlignment = Enum.VerticalAlignment.Center,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+}, filterBar)
 
-local listPadding = Instance.new("UIPadding")
-listPadding.PaddingBottom = UDim.new(0, 25)
-listPadding.PaddingRight = UDim.new(0, 3)
-listPadding.Parent = scrolling
+addPadding(filterBar, 10, 10, 0, 0)
+
+local scrolling = new("ScrollingFrame", {
+    Name = "Messages",
+    Position = UDim2.new(0, 8, 0, FILTER_H + 2),
+    Size = UDim2.new(1, -16, 1, -(FILTER_H + 8)),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = Colors.Border,
+    ScrollBarImageTransparency = 0.2,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+    ElasticBehavior = Enum.ElasticBehavior.WhenScrollable,
+    ClipsDescendants = true,
+}, body)
+
+local listLayout = new("UIListLayout", {
+    Name = "MessageLayout",
+    Padding = UDim.new(0, 4),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, scrolling)
+
+addPadding(scrolling, 0, 4, 2, 30)
+
+local emptyLabel = new("TextLabel", {
+    Name = "EmptyState",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.new(0.5, 0, 0.5, 10),
+    Size = UDim2.new(1, -40, 0, 40),
+    BackgroundTransparency = 1,
+    Text = "No messages yet",
+    TextColor3 = Colors.Muted,
+    TextSize = 14,
+    Font = Enum.Font.GothamMedium,
+    ZIndex = 2,
+}, body)
+
+local latestButton = new("TextButton", {
+    Name = "LatestButton",
+    AnchorPoint = Vector2.new(0, 1),
+    Position = UDim2.new(0, 12, 1, -10),
+    Size = UDim2.new(0, 0, 0, 28),
+    AutomaticSize = Enum.AutomaticSize.X,
+    BackgroundColor3 = Colors.Accent,
+    BorderSizePixel = 0,
+    AutoButtonColor = true,
+    Text = "Jump to latest",
+    TextColor3 = Colors.Background,
+    TextSize = 12,
+    Font = Enum.Font.GothamBold,
+    Visible = false,
+    ZIndex = 9,
+}, body)
+
+addCorner(latestButton, 14)
+addPadding(latestButton, 12, 12, 0, 0)
 
 --==================================================
--- RESIZE HANDLE
+-- RESIZE HANDLE + TOAST
 --==================================================
 
-local resizeHandle = Instance.new("ImageButton")
-resizeHandle.Name = "ResizeHandle"
-resizeHandle.AnchorPoint = Vector2.new(1, 1)
-resizeHandle.Position = UDim2.new(1, -4, 1, -4)
-resizeHandle.Size = UDim2.fromOffset(22, 22)
-resizeHandle.BackgroundTransparency = 1
-resizeHandle.BorderSizePixel = 0
-resizeHandle.AutoButtonColor = false
-resizeHandle.Image = resizeIcon or ""
-resizeHandle.ImageColor3 = Colors.Muted
-resizeHandle.ScaleType = Enum.ScaleType.Fit
-resizeHandle.ZIndex = 10
-resizeHandle.Parent = window
+local resizeHandle = new("ImageButton", {
+    Name = "ResizeHandle",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -4, 1, -4),
+    Size = UDim2.fromOffset(24, 24),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
+    Image = resizeIcon or "",
+    ImageColor3 = Colors.Muted,
+    ScaleType = Enum.ScaleType.Fit,
+    ZIndex = 10,
+}, window)
 
--- If the custom image cannot be loaded, show a simple fallback.
 if not resizeIcon then
-    resizeHandle.Image = ""
-    resizeHandle.BackgroundTransparency = 1
+    new("TextLabel", {
+        Name = "ResizeFallback",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "◢",
+        TextColor3 = Colors.Muted,
+        TextSize = 17,
+        Font = Enum.Font.Gotham,
+        ZIndex = 11,
+    }, resizeHandle)
+end
 
-    local fallback = Instance.new("TextLabel")
-    fallback.Name = "ResizeFallback"
-    fallback.Size = UDim2.fromScale(1, 1)
-    fallback.BackgroundTransparency = 1
-    fallback.Text = "◢"
-    fallback.TextColor3 = Colors.Muted
-    fallback.TextSize = 17
-    fallback.Font = Enum.Font.Gotham
-    fallback.ZIndex = 11
-    fallback.Parent = resizeHandle
+local toast = new("TextLabel", {
+    Name = "Toast",
+    AnchorPoint = Vector2.new(0.5, 1),
+    Position = UDim2.new(0.5, 0, 1, -12),
+    Size = UDim2.new(0, 0, 0, 28),
+    AutomaticSize = Enum.AutomaticSize.X,
+    BackgroundColor3 = Colors.Header,
+    BorderSizePixel = 0,
+    Text = "",
+    TextColor3 = Colors.Text,
+    TextSize = 12,
+    Font = Enum.Font.GothamMedium,
+    Visible = false,
+    ZIndex = 12,
+}, window)
+
+addCorner(toast, 14)
+addPadding(toast, 14, 14, 0, 0)
+
+new("UIStroke", {
+    Color = Colors.Border,
+    Thickness = 1,
+    Transparency = 0.2,
+}, toast)
+
+local toastToken = 0
+
+local function showToast(text)
+    toastToken += 1
+    local token = toastToken
+
+    toast.Text = text
+    toast.Visible = true
+
+    task.delay(1.4, function()
+        if toastToken == token and toast.Parent then
+            toast.Visible = false
+        end
+    end)
+end
+
+local function copyText(text)
+    if type(clipboardFunction) ~= "function" then
+        showToast("Clipboard not supported")
+        return
+    end
+
+    local ok = pcall(clipboardFunction, text)
+    showToast(ok and "Copied" or "Copy failed")
+end
+
+--==================================================
+-- STATE
+--==================================================
+
+local entries = {}
+local counts = { info = 0, warn = 0, error = 0 }
+local currentFilter = "all"
+local nextId = 0
+local stickToBottom = true
+local minimized = false
+local expandedSize = window.Size
+
+local tabs = {}
+
+local FILTERS = {
+    { id = "all", label = "All" },
+    { id = "info", label = "Info" },
+    { id = "warn", label = "Warn" },
+    { id = "error", label = "Error" },
+}
+
+local function totalCount()
+    return counts.info + counts.warn + counts.error
+end
+
+local function updateTitle()
+    if minimized then
+        if counts.error > 0 then
+            titleLabel.Text = string.format("Output · %d err", counts.error)
+            titleLabel.TextColor3 = Colors.Error
+        elseif counts.warn > 0 then
+            titleLabel.Text = string.format("Output · %d warn", counts.warn)
+            titleLabel.TextColor3 = Colors.Warning
+        else
+            titleLabel.Text = "Output"
+            titleLabel.TextColor3 = Colors.Text
+        end
+    else
+        titleLabel.Text = "Output"
+        titleLabel.TextColor3 = Colors.Text
+    end
+end
+
+local function updateTabs()
+    for _, filter in ipairs(FILTERS) do
+        local tab = tabs[filter.id]
+        local count = filter.id == "all" and totalCount() or counts[filter.id]
+
+        if filter.id == "all" then
+            tab.Text = string.format("All %d", count)
+        elseif count > 0 then
+            tab.Text = string.format("%s %d", filter.label, count)
+        else
+            tab.Text = filter.label
+        end
+
+        local active = currentFilter == filter.id
+        tween(tab, {
+            BackgroundColor3 = active and Colors.Accent or Colors.Button,
+            BackgroundTransparency = active and 0 or 0.35,
+            TextColor3 = active and Colors.Background or Colors.Muted,
+        }, 0.12)
+    end
+
+    -- Status dot reflects the worst recent level.
+    if counts.error > 0 then
+        statusDot.BackgroundColor3 = Colors.Error
+    elseif counts.warn > 0 then
+        statusDot.BackgroundColor3 = Colors.Warning
+    else
+        statusDot.BackgroundColor3 = Colors.Accent
+    end
+
+    updateTitle()
+end
+
+local function scrollToBottom()
+    scrolling.CanvasPosition = Vector2.new(
+        0,
+        math.max(0, scrolling.AbsoluteCanvasSize.Y - scrolling.AbsoluteWindowSize.Y)
+    )
+end
+
+local function applyFilter()
+    local anyVisible = false
+
+    for _, entry in ipairs(entries) do
+        local visible = currentFilter == "all" or currentFilter == entry.kind
+        entry.row.Visible = visible
+
+        if visible then
+            anyVisible = true
+        end
+    end
+
+    emptyLabel.Visible = not anyVisible
+    emptyLabel.Text = #entries == 0 and "No messages yet" or "Nothing matches this filter"
+
+    updateTabs()
+end
+
+local function setFilter(id)
+    currentFilter = id
+    stickToBottom = true
+    applyFilter()
+    task.defer(scrollToBottom)
+end
+
+for index, filter in ipairs(FILTERS) do
+    local tab = new("TextButton", {
+        Name = filter.label .. "Tab",
+        Size = UDim2.new(0, 0, 0, 26),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = Colors.Button,
+        BackgroundTransparency = 0.35,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = filter.label,
+        TextColor3 = Colors.Muted,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        LayoutOrder = index,
+        ZIndex = 3,
+    }, filterBar)
+
+    addCorner(tab, 13)
+    addPadding(tab, 9, 9, 0, 0)
+
+    tabs[filter.id] = tab
+
+    connect(tab.Activated, function()
+        setFilter(filter.id)
+    end)
+end
+
+--==================================================
+-- MESSAGES
+--==================================================
+
+local function getKind(messageType)
+    if messageType == Enum.MessageType.MessageError then
+        return "error"
+    end
+
+    if messageType == Enum.MessageType.MessageWarning then
+        return "warn"
+    end
+
+    return "info"
+end
+
+local function removeOldest()
+    local oldest = table.remove(entries, 1)
+
+    if oldest then
+        counts[oldest.kind] = math.max(0, counts[oldest.kind] - 1)
+
+        if oldest.row and oldest.row.Parent then
+            oldest.row:Destroy()
+        end
+    end
+end
+
+local function addMessage(message, messageType, timestamp)
+    if not gui.Parent then
+        return
+    end
+
+    local text = tostring(message)
+
+    if #text > MAX_MESSAGE_LENGTH then
+        text = string.sub(text, 1, MAX_MESSAGE_LENGTH) .. "..."
+    end
+
+    local kind = getKind(messageType)
+    local color = KIND_COLORS[kind]
+    local timeText = os.date("%H:%M:%S", type(timestamp) == "number" and timestamp or os.time())
+
+    nextId += 1
+
+    local row = new("Frame", {
+        Name = "Message",
+        Size = UDim2.new(1, -6, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = Colors.Surface,
+        BackgroundTransparency = 0.3,
+        BorderSizePixel = 0,
+        LayoutOrder = nextId,
+        ZIndex = 2,
+    }, scrolling)
+
+    addCorner(row, 8)
+
+    new("Frame", {
+        Name = "Accent",
+        Position = UDim2.new(0, 0, 0, 6),
+        Size = UDim2.new(0, 3, 1, -12),
+        BackgroundColor3 = color,
+        BorderSizePixel = 0,
+        ZIndex = 3,
+    }, row)
+
+    local label = new("TextLabel", {
+        Name = "Text",
+        Position = UDim2.new(0, 10, 0, 0),
+        Size = UDim2.new(1, -10, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Font = Enum.Font.Code,
+        TextSize = FONT_SIZE,
+        TextColor3 = color,
+        RichText = true,
+        Text = string.format(
+            '<font color="%s" size="%d">%s</font>  %s',
+            toHex(Colors.Muted),
+            FONT_SIZE - 2,
+            timeText,
+            escapeRich(text)
+        ),
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        ZIndex = 2,
+    }, row)
+
+    addPadding(label, 4, 6, 6, 6)
+
+    -- Invisible tap target: tap a line to copy it.
+    local tapTarget = new("TextButton", {
+        Name = "TapTarget",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 4,
+    }, row)
+
+    connect(tapTarget.Activated, function()
+        copyText(string.format("[%s] [%s] %s", timeText, KIND_NAMES[kind], text))
+        row.BackgroundTransparency = 0
+        tween(row, { BackgroundTransparency = 0.3 }, 0.35)
+    end)
+
+    counts[kind] += 1
+
+    table.insert(entries, {
+        id = nextId,
+        row = row,
+        kind = kind,
+        text = text,
+        time = timeText,
+    })
+
+    while #entries > MAX_MESSAGES do
+        removeOldest()
+    end
+
+    row.Visible = currentFilter == "all" or currentFilter == kind
+
+    if row.Visible then
+        emptyLabel.Visible = false
+    end
+
+    updateTabs()
+end
+
+local function clearMessages()
+    for _, entry in ipairs(entries) do
+        if entry.row and entry.row.Parent then
+            entry.row:Destroy()
+        end
+    end
+
+    table.clear(entries)
+    counts.info, counts.warn, counts.error = 0, 0, 0
+
+    stickToBottom = true
+    latestButton.Visible = false
+    scrolling.CanvasPosition = Vector2.new(0, 0)
+
+    applyFilter()
+end
+
+local function copyAll()
+    local lines = {}
+
+    for _, entry in ipairs(entries) do
+        if currentFilter == "all" or currentFilter == entry.kind then
+            table.insert(lines, string.format(
+                "[%s] [%s] %s",
+                entry.time,
+                KIND_NAMES[entry.kind],
+                entry.text
+            ))
+        end
+    end
+
+    if #lines == 0 then
+        showToast("Nothing to copy")
+        return
+    end
+
+    copyText(table.concat(lines, "\n"))
+end
+
+--==================================================
+-- AUTO SCROLL
+--==================================================
+
+connect(scrolling:GetPropertyChangedSignal("CanvasPosition"), function()
+    local maxY = math.max(0, scrolling.AbsoluteCanvasSize.Y - scrolling.AbsoluteWindowSize.Y)
+
+    stickToBottom = scrolling.CanvasPosition.Y >= maxY - 24
+    latestButton.Visible = not stickToBottom and #entries > 0
+end)
+
+connect(listLayout:GetPropertyChangedSignal("AbsoluteContentSize"), function()
+    if stickToBottom then
+        task.defer(scrollToBottom)
+    end
+end)
+
+connect(latestButton.Activated, function()
+    stickToBottom = true
+    latestButton.Visible = false
+    scrollToBottom()
+end)
+
+connect(clearButton.Activated, clearMessages)
+connect(copyButton.Activated, copyAll)
+
+--==================================================
+-- WINDOW HELPERS
+--==================================================
+
+local function clampPosition(x, y, width)
+    local screen = gui.AbsoluteSize
+
+    return Vector2.new(
+        math.clamp(x, 0, math.max(0, screen.X - width)),
+        math.clamp(y, 0, math.max(0, screen.Y - HEADER_H))
+    )
 end
 
 --==================================================
@@ -360,34 +925,27 @@ end
 local dragging = false
 local dragInput = nil
 local dragStart = nil
-local dragStartPosition = nil
+local dragOrigin = nil
 
-local function beginDragging(input)
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1
-        and input.UserInputType ~= Enum.UserInputType.Touch then
+connect(header.InputBegan, function(input)
+    if not isPointerStart(input) then
         return
     end
 
     dragging = true
     dragStart = input.Position
-    dragStartPosition = window.Position
+    dragOrigin = window.AbsolutePosition
+    dragInput = input.UserInputType == Enum.UserInputType.Touch and input or nil
 
-    if input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
-    else
-        dragInput = nil
-    end
-
-    input.Changed:Connect(function()
+    local changed
+    changed = input.Changed:Connect(function()
         if input.UserInputState == Enum.UserInputState.End then
             dragging = false
             dragInput = nil
+            changed:Disconnect()
         end
     end)
-end
-
-header.InputBegan:Connect(beginDragging)
-titleLabel.InputBegan:Connect(beginDragging)
+end)
 
 --==================================================
 -- WINDOW RESIZING
@@ -396,66 +954,72 @@ titleLabel.InputBegan:Connect(beginDragging)
 local resizing = false
 local resizeInput = nil
 local resizeStart = nil
-local resizeStartSize = nil
+local resizeOrigin = nil
 
-resizeHandle.InputBegan:Connect(function(input)
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1
-        and input.UserInputType ~= Enum.UserInputType.Touch then
+connect(resizeHandle.InputBegan, function(input)
+    if not isPointerStart(input) then
         return
     end
 
     resizing = true
     resizeStart = input.Position
-    resizeStartSize = window.Size
+    resizeOrigin = window.AbsoluteSize
+    resizeInput = input.UserInputType == Enum.UserInputType.Touch and input or nil
 
-    if input.UserInputType == Enum.UserInputType.Touch then
-        resizeInput = input
-    else
-        resizeInput = nil
-    end
-
-    input.Changed:Connect(function()
+    local changed
+    changed = input.Changed:Connect(function()
         if input.UserInputState == Enum.UserInputState.End then
             resizing = false
             resizeInput = nil
+            changed:Disconnect()
         end
     end)
 end)
 
-UserInputService.InputChanged:Connect(function(input)
-    local isMouseMovement =
-        input.UserInputType == Enum.UserInputType.MouseMovement
+connect(UserInputService.InputChanged, function(input)
+    local isMouse = input.UserInputType == Enum.UserInputType.MouseMovement
 
-    if dragging and dragStart and dragStartPosition then
-        local isActivePointer = isMouseMovement
-            or (dragInput ~= nil and input == dragInput)
-
-        if isActivePointer then
+    if dragging and dragStart and dragOrigin then
+        if isMouse or (dragInput ~= nil and input == dragInput) then
             local delta = input.Position - dragStart
-
-            window.Position = UDim2.new(
-                dragStartPosition.X.Scale,
-                dragStartPosition.X.Offset + delta.X,
-                dragStartPosition.Y.Scale,
-                dragStartPosition.Y.Offset + delta.Y
+            local position = clampPosition(
+                dragOrigin.X + delta.X,
+                dragOrigin.Y + delta.Y,
+                window.AbsoluteSize.X
             )
+
+            window.Position = UDim2.fromOffset(position.X, position.Y)
         end
     end
 
-    if resizing and resizeStart and resizeStartSize then
-        local isActivePointer = isMouseMovement
-            or (resizeInput ~= nil and input == resizeInput)
-
-        if isActivePointer then
+    if resizing and resizeStart and resizeOrigin then
+        if isMouse or (resizeInput ~= nil and input == resizeInput) then
             local delta = input.Position - resizeStart
+            local screen = gui.AbsoluteSize
+            local origin = window.AbsolutePosition
 
-            window.Size = UDim2.new(
-                resizeStartSize.X.Scale,
-                resizeStartSize.X.Offset + delta.X,
-                resizeStartSize.Y.Scale,
-                resizeStartSize.Y.Offset + delta.Y
+            local width = math.clamp(
+                resizeOrigin.X + delta.X,
+                MIN_W,
+                math.max(MIN_W, math.min(MAX_W, screen.X - origin.X))
             )
+
+            local height = math.clamp(
+                resizeOrigin.Y + delta.Y,
+                MIN_H,
+                math.max(MIN_H, math.min(MAX_H, screen.Y - origin.Y))
+            )
+
+            window.Size = UDim2.fromOffset(width, height)
+            expandedSize = window.Size
         end
+    end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+        resizing = false
     end
 end)
 
@@ -463,158 +1027,82 @@ end)
 -- MINIMIZE AND RESTORE
 --==================================================
 
-local minimized = false
-local previousSize = window.Size
-local previousPosition = window.Position
-
 local function setMinimized(state)
     if minimized == state then
         return
     end
 
+    minimized = state
+
     if state then
-        previousSize = window.Size
-        previousPosition = window.Position
+        expandedSize = window.Size
 
-        minimized = true
-
-        -- Collapse the entire window to a small header.
-        window.Size = UDim2.fromOffset(180, 44)
-        window.BackgroundColor3 = Colors.Header
-
-        content.Visible = false
+        body.Visible = false
         resizeHandle.Visible = false
-        windowStroke.Transparency = 0.45
+        copyButton.Visible = false
+        clearButton.Visible = false
+        toast.Visible = false
+        headerFill.Visible = false
+        headerLine.Visible = false
+
+        titleLabel.Size = UDim2.new(1, -112, 1, 0)
+
+        if minimizeImage then
+            minimizeImage.Visible = false
+        end
 
         minimizeButton.Text = "□"
+        minimizeButton.TextSize = 16
 
-        local icon = minimizeButton:FindFirstChild("MinimizeIcon")
-        if icon then
-            icon.Visible = false
-        end
+        tween(window, { Size = UDim2.fromOffset(MINI_W, HEADER_H) }, 0.2)
+        tween(window, { BackgroundColor3 = Colors.Header }, 0.2)
     else
-        minimized = false
-
-        window.Size = previousSize
-        window.Position = previousPosition
-        window.BackgroundColor3 = Colors.Background
-
-        content.Visible = true
+        body.Visible = true
         resizeHandle.Visible = true
-        windowStroke.Transparency = 0.25
+        copyButton.Visible = true
+        clearButton.Visible = true
+        headerFill.Visible = true
+        headerLine.Visible = true
 
-        minimizeButton.Text = ""
+        titleLabel.Size = UDim2.new(1, -204, 1, 0)
 
-        local icon = minimizeButton:FindFirstChild("MinimizeIcon")
-        if icon then
-            icon.Visible = true
+        if minimizeImage then
+            minimizeImage.Visible = true
+            minimizeButton.Text = ""
+        else
+            minimizeButton.Text = "–"
+            minimizeButton.TextSize = 20
         end
+
+        -- Keep the restored window fully on-screen.
+        local position = clampPosition(
+            window.AbsolutePosition.X,
+            window.AbsolutePosition.Y,
+            expandedSize.X.Offset
+        )
+
+        window.Position = UDim2.fromOffset(position.X, position.Y)
+
+        tween(window, { Size = expandedSize }, 0.2)
+        tween(window, { BackgroundColor3 = Colors.Background }, 0.2)
+
+        task.defer(function()
+            if stickToBottom then
+                scrollToBottom()
+            end
+        end)
     end
+
+    updateTitle()
 end
 
-minimizeButton.Activated:Connect(function()
+connect(minimizeButton.Activated, function()
     setMinimized(not minimized)
 end)
 
 --==================================================
--- OUTPUT MESSAGES
---==================================================
-
-local MAX_MESSAGES = 150
-local FONT_SIZE = 14
-
-local messageRows = {}
-local messageCount = 0
-
-local function clearMessages()
-    for _, row in ipairs(messageRows) do
-        if row and row.Parent then
-            row:Destroy()
-        end
-    end
-
-    table.clear(messageRows)
-    messageCount = 0
-    scrolling.CanvasPosition = Vector2.new(0, 0)
-end
-
-local function getMessageColor(messageType)
-    if messageType == Enum.MessageType.MessageWarning then
-        return Colors.Warning
-    end
-
-    if messageType == Enum.MessageType.MessageError then
-        return Colors.Error
-    end
-
-    return Colors.Info
-end
-
-local function addMessage(message, messageType)
-    if not gui.Parent then
-        return
-    end
-
-    messageCount += 1
-
-    local label = Instance.new("TextLabel")
-    label.Name = "Message"
-    label.Size = UDim2.new(1, -8, 0, 0)
-    label.AutomaticSize = Enum.AutomaticSize.Y
-    label.BackgroundTransparency = 1
-    label.BorderSizePixel = 0
-    label.Font = Enum.Font.Code
-    label.TextSize = FONT_SIZE
-    label.TextColor3 = getMessageColor(messageType)
-    label.Text = tostring(message)
-    label.TextWrapped = true
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextYAlignment = Enum.TextYAlignment.Top
-    label.RichText = false
-    label.LayoutOrder = messageCount
-    label.ZIndex = 2
-    label.Parent = scrolling
-
-    table.insert(messageRows, label)
-
-    while #messageRows > MAX_MESSAGES do
-        local oldest = table.remove(messageRows, 1)
-
-        if oldest and oldest.Parent then
-            oldest:Destroy()
-        end
-    end
-
-    -- Scroll to the latest message after the layout updates.
-    task.defer(function()
-        if not scrolling.Parent then
-            return
-        end
-
-        local canvasHeight = listLayout.AbsoluteContentSize.Y
-        local viewHeight = scrolling.AbsoluteWindowSize.Y
-
-        scrolling.CanvasPosition = Vector2.new(
-            0,
-            math.max(0, canvasHeight - viewHeight)
-        )
-    end)
-end
-
-clearButton.Activated:Connect(clearMessages)
-
---==================================================
 -- CLOSE AND CLEANUP
 --==================================================
-
-local connections = {}
-
-table.insert(
-    connections,
-    LogService.MessageOut:Connect(function(message, messageType)
-        addMessage(message, messageType)
-    end)
-)
 
 local cleanedUp = false
 
@@ -642,10 +1130,33 @@ end
 
 env.MobileOutputCleanup = cleanup
 
-closeButton.Activated:Connect(cleanup)
+connect(closeButton.Activated, cleanup)
 
 --==================================================
--- DISPLAY
+-- START
 --==================================================
+
+applyFilter()
+
+if PREFILL_HISTORY then
+    local ok, history = pcall(function()
+        return LogService:GetLogHistory()
+    end)
+
+    if ok and type(history) == "table" then
+        local first = math.max(1, #history - MAX_MESSAGES + 1)
+
+        for index = first, #history do
+            local entry = history[index]
+            addMessage(entry.message, entry.messageType, entry.timestamp)
+        end
+    end
+end
+
+connect(LogService.MessageOut, function(message, messageType)
+    addMessage(message, messageType)
+end)
 
 gui.Parent = CoreGui
+
+task.defer(scrollToBottom)
