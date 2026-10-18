@@ -109,15 +109,12 @@ local function downloadAsset(filename, url)
     return nil
 end
 
-local minimizeIcon = downloadAsset(
-    "minimize-2.png",
-    "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/minimize-2.png"
-)
+local IMAGE_BASE = "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/"
 
-local resizeIcon = downloadAsset(
-    "handle-bottom-right.png",
-    "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/handle-bottom-right.png"
-)
+-- Local filenames are versioned so old cached (dark) copies are ignored.
+local minimizeIcon = downloadAsset("MobileOutput_v2_minimize-2.png", IMAGE_BASE .. "minimize-2.png")
+local maximizeIcon = downloadAsset("MobileOutput_v2_maximize.png", IMAGE_BASE .. "maximize.png")
+local resizeIcon = downloadAsset("MobileOutput_v2_handle-bottom-right.png", IMAGE_BASE .. "handle-bottom-right.png")
 
 --==================================================
 -- THEME
@@ -393,7 +390,7 @@ if minimizeIcon then
         Name = "MinimizeIcon",
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(16, 16),
+        Size = UDim2.fromOffset(18, 18),
         BackgroundTransparency = 1,
         Image = minimizeIcon,
         ImageColor3 = Colors.Text,
@@ -403,6 +400,25 @@ if minimizeIcon then
 else
     minimizeButton.Text = "–"
     minimizeButton.TextSize = 20
+end
+
+-- Swaps the button between the minimize and maximize looks.
+local function setMinimizeButtonLook(isMinimized)
+    if minimizeImage then
+        local icon = isMinimized and maximizeIcon or minimizeIcon
+
+        if icon then
+            minimizeImage.Image = icon
+            minimizeImage.Visible = true
+            minimizeButton.Text = ""
+            return
+        end
+
+        minimizeImage.Visible = false
+    end
+
+    minimizeButton.Text = isMinimized and "□" or "–"
+    minimizeButton.TextSize = isMinimized and 16 or 20
 end
 
 --==================================================
@@ -1047,12 +1063,7 @@ local function setMinimized(state)
 
         titleLabel.Size = UDim2.new(1, -112, 1, 0)
 
-        if minimizeImage then
-            minimizeImage.Visible = false
-        end
-
-        minimizeButton.Text = "□"
-        minimizeButton.TextSize = 16
+        setMinimizeButtonLook(true)
 
         tween(window, { Size = UDim2.fromOffset(MINI_W, HEADER_H) }, 0.2)
         tween(window, { BackgroundColor3 = Colors.Header }, 0.2)
@@ -1066,13 +1077,7 @@ local function setMinimized(state)
 
         titleLabel.Size = UDim2.new(1, -204, 1, 0)
 
-        if minimizeImage then
-            minimizeImage.Visible = true
-            minimizeButton.Text = ""
-        else
-            minimizeButton.Text = "–"
-            minimizeButton.TextSize = 20
-        end
+        setMinimizeButtonLook(false)
 
         -- Keep the restored window fully on-screen.
         local position = clampPosition(
