@@ -71,20 +71,31 @@ end
 local requestFunction = getRequestFunction()
 local clipboardFunction = env.setclipboard or env.toclipboard or env.set_clipboard
 
+local Foldy = "MobileOutput"
+
 local function downloadAsset(filename, url)
     local fileExists = env.isfile
     local saveFile = env.writefile
+    local makeFolder = env.makefolder
+    local isFolder = env.isfolder
     local getAsset = env.getcustomasset or env.getsynasset
 
     if type(fileExists) ~= "function"
         or type(saveFile) ~= "function"
+        or type(makeFolder) ~= "function"
         or type(getAsset) ~= "function"
         or type(requestFunction) ~= "function" then
         return nil
     end
 
+    local path = IMAGE_FOLDER .. "/" .. filename
+
     local ok, result = pcall(function()
-        if not fileExists(filename) then
+        if type(isFolder) ~= "function" or not isFolder(IMAGE_FOLDER) then
+            makeFolder(IMAGE_FOLDER)
+        end
+
+        if not fileExists(path) then
             local response = requestFunction({
                 Url = url,
                 Method = "GET",
@@ -95,10 +106,10 @@ local function downloadAsset(filename, url)
                 "Image download failed: " .. filename
             )
 
-            saveFile(filename, response.Body)
+            saveFile(path, response.Body)
         end
 
-        return getAsset(filename)
+        return getAsset(path)
     end)
 
     if ok then
@@ -109,12 +120,24 @@ local function downloadAsset(filename, url)
     return nil
 end
 
-local IMAGE_BASE = "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/"
+local IMAGE_BASE =
+    "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/"
 
 -- Local filenames are versioned so old cached (dark) copies are ignored.
-local minimizeIcon = downloadAsset("MobileOutput_v2_minimize-2.png", IMAGE_BASE .. "minimize-2.png")
-local maximizeIcon = downloadAsset("MobileOutput_v2_maximize.png", IMAGE_BASE .. "maximize.png")
-local resizeIcon = downloadAsset("MobileOutput_v2_handle-bottom-right.png", IMAGE_BASE .. "handle-bottom-right.png")
+local minimizeIcon = downloadAsset(
+    "minimize-2.png",
+    IMAGE_BASE .. "minimize-2.png"
+)
+
+local maximizeIcon = downloadAsset(
+    "maximize.png",
+    IMAGE_BASE .. "maximize.png"
+)
+
+local resizeIcon = downloadAsset(
+    "handle-bottom-right.png",
+    IMAGE_BASE .. "handle-bottom-right.png"
+)
 
 --==================================================
 -- THEME
