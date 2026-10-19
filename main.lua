@@ -96,12 +96,12 @@ local function downloadAsset(filename, url)
                 makeFolder("MobileOutput")
             end
 
-        if not isFolder(IMAGE_FOLDER) then
-            makeFolder(IMAGE_FOLDER)
+        if not isFolder(Foldy) then
+            makeFolder(Foldy)
         end
     else
         makeFolder("MobileOutput")
-        makeFolder(IMAGE_FOLDER)
+        makeFolder(Foldy)
     end
 
     if not fileExists(path) then
