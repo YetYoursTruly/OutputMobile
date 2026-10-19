@@ -88,7 +88,7 @@ local function downloadAsset(filename, url)
         return nil
     end
 
-    local path = IMAGE_FOLDER .. "/" .. filename
+    local path = Foldy .. "/" .. filename
 
     local ok, result = pcall(function()
         if type(isFolder) == "function" then
