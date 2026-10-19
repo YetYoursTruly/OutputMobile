@@ -138,7 +138,7 @@ local function downloadAsset(filename, url)
     return nil
 end
 
-local BASE = "https://raw.githubusercontent.com/..."
+local IMAGE_BASE = "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/"
 
 -- Local filenames are versioned so old cached (dark) copies are ignored.
 local minimizeIcon = downloadAsset(
