@@ -82,54 +82,63 @@ local function downloadAsset(filename, url)
 
     if type(fileExists) ~= "function"
         or type(saveFile) ~= "function"
-        or type(makeFolder) ~= "function"
         or type(getAsset) ~= "function"
         or type(requestFunction) ~= "function" then
+        warn("[MobileOutput] Executor is missing file/request functions")
         return nil
     end
 
     local path = Foldy .. "/" .. filename
+    local step = "start"
 
     local ok, result = pcall(function()
-        if type(isFolder) == "function" then
-            if not isFolder("MobileOutput") then
-                makeFolder("MobileOutput")
+        step = "folder"
+        if type(makeFolder) == "function" then
+            local exists = false
+            if type(isFolder) == "function" then
+                local okF, v = pcall(isFolder, Foldy)
+                exists = okF and v == true
             end
-
-        if not isFolder(Foldy) then
-            makeFolder(Foldy)
+            if not exists then
+                pcall(makeFolder, Foldy)
+            end
         end
-    else
-        makeFolder("MobileOutput")
-        makeFolder(Foldy)
-    end
 
-    if not fileExists(path) then
-        local response = requestFunction({
-            Url = url,
-            Method = "GET",
-        })
+        step = "isfile"
+        local cached = fileExists(path)
 
-        assert(
-            response and response.StatusCode == 200,
-            "Image download failed: " .. filename
-        )
+        if not cached then
+            step = "request"
+            local response = requestFunction({
+                Url = url,
+                Method = "GET",
+            })
 
-        saveFile(path, response.Body)
-    end
+            assert(type(response) == "table", "no response")
+            assert(response.StatusCode == 200,
+                "HTTP " .. tostring(response.StatusCode))
 
-    return getAsset(path)
+            local data = response.Body or response.body
+            assert(type(data) == "string" and #data > 0, "empty body")
+
+            step = "writefile"
+            saveFile(path, data)
+        end
+
+        step = "getasset"
+        return getAsset(path)
     end)
 
     if ok then
         return result
     end
 
-    warn("[MobileOutput] " .. tostring(result))
+    warn(string.format("[MobileOutput] %s failed at '%s': %s",
+        filename, step, tostring(result)))
     return nil
 end
 
-local IMAGE_BASE =
+local BASE =
     "https://raw.githubusercontent.com/YetYoursTruly/OutputMobile/main/Images/"
 
 -- Local filenames are versioned so old cached (dark) copies are ignored.
