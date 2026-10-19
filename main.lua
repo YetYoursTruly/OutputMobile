@@ -71,7 +71,7 @@ end
 local requestFunction = getRequestFunction()
 local clipboardFunction = env.setclipboard or env.toclipboard or env.set_clipboard
 
-local Foldy = "MobileOutput"
+local Foldy = "MobileOutput/Images"
 
 local function downloadAsset(filename, url)
     local fileExists = env.isfile
@@ -91,25 +91,34 @@ local function downloadAsset(filename, url)
     local path = IMAGE_FOLDER .. "/" .. filename
 
     local ok, result = pcall(function()
-        if type(isFolder) ~= "function" or not isFolder(IMAGE_FOLDER) then
+        if type(isFolder) == "function" then
+            if not isFolder("MobileOutput") then
+                makeFolder("MobileOutput")
+            end
+
+        if not isFolder(IMAGE_FOLDER) then
             makeFolder(IMAGE_FOLDER)
         end
+    else
+        makeFolder("MobileOutput")
+        makeFolder(IMAGE_FOLDER)
+    end
 
-        if not fileExists(path) then
-            local response = requestFunction({
-                Url = url,
-                Method = "GET",
-            })
+    if not fileExists(path) then
+        local response = requestFunction({
+            Url = url,
+            Method = "GET",
+        })
 
-            assert(
-                response and response.StatusCode == 200,
-                "Image download failed: " .. filename
-            )
+        assert(
+            response and response.StatusCode == 200,
+            "Image download failed: " .. filename
+        )
 
-            saveFile(path, response.Body)
-        end
+        saveFile(path, response.Body)
+    end
 
-        return getAsset(path)
+    return getAsset(path)
     end)
 
     if ok then
